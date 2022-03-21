@@ -17,3 +17,7 @@ Start the service
 Start the service
 
     APP_ENV=backtest CANDLE_PATH=~/Documents/Instruments LEVERAGE=30:1 INITIAL_BALANCE=10_000.00 MARGIN_CLOSEOUT_ON_INITIAL_BALANCE=true bin/oanda_worker
+
+## Contributing
+
+Bug reports and pull requests are welcome on GitHub at https://github.com/kobusjoubert/oanda_worker.
