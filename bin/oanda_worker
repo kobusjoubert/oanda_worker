@@ -1,0 +1,95 @@
+#!/usr/bin/env ruby
+root = File.expand_path('../lib', File.dirname(__FILE__))
+$: << root # Same as `$LOAD_PATH << root`
+
+require 'bundler/setup' # Set up gems listed in the Gemfile.
+require 'logger'
+require 'json'
+require 'redis'
+require 'bunny'
+require 'sneakers'
+require 'sneakers/runner'
+require 'sneakers/handlers/maxretry'
+require 'sneakers/metrics/logging_metrics'
+require 'aws-sdk-machinelearning'
+require 'oanda_worker'
+
+Bundler.require(:default, ENV['APP_ENV'])
+
+# Logger.
+$logger = Logger.new(ENV['LOG_OUTPUT'] || $stdout)
+$logger.level = ['development', 'backtest'].include?(ENV['APP_ENV']) ? Logger::DEBUG : Logger::INFO
+
+# Redis.
+$redis = Redis.new(url: ENV['REDIS_URL'])
+
+# RabbitMQ Publisher.
+url_publisher = ENV['CLOUDAMQP_URL'] || 'amqp://guest:guest@localhost:5672'
+$rabbitmq_connection = Bunny.new(url_publisher)
+$rabbitmq_connection.start
+$rabbitmq_channel = $rabbitmq_connection.create_channel
+$rabbitmq_exchange = $rabbitmq_channel.direct('oanda_app', durable: true)
+
+# These queues are bound by Sneakers in oanda_trader.
+
+# qt_strategy_activity = $rabbitmq_channel.queue('qt_strategy_activity', durable: true, auto_delete: false)
+# qt_strategy_activity.bind($rabbitmq_exchange, routing_key: 'qt_strategy_activity')
+#
+# qt_strategy_warning = $rabbitmq_channel.queue('qt_strategy_warning', durable: true, auto_delete: false)
+# qt_strategy_warning.bind($rabbitmq_exchange, routing_key: 'qt_strategy_warning')
+
+# These queues are bound by Sneakers.
+
+# qw_strategy_update = $rabbitmq_channel.queue('qw_strategy_update', durable: true, auto_delete: false)
+# qw_strategy_update.bind($rabbitmq_exchange, routing_key: 'qw_strategy_update')
+
+# qw_strategy_run_all = $rabbitmq_channel.queue('qw_strategy_run_all', durable: true, auto_delete: false)
+# qw_strategy_run_all.bind($rabbitmq_exchange, routing_key: 'qw_strategy_run_all')
+
+# qw_strategy_run_one = $rabbitmq_channel.queue('qw_strategy_run_one', durable: true, auto_delete: false)
+# qw_strategy_run_one.bind($rabbitmq_exchange, routing_key: 'qw_strategy_run_one')
+
+# qw_account_update = $rabbitmq_channel.queue('qw_account_update', durable: true, auto_delete: false)
+# qw_account_update.bind($rabbitmq_exchange, routing_key: 'qw_account_update')
+
+# RabbitMQ Worker.
+#
+# Setting RABBIT_WORKER_THREADS_PER_CPU higher than 2 causes the following exception to be raised:
+#
+#   oanda_api_v20-api-fxpractice.oanda.com:443: Waiting for an available connection, all 2 connections are checked out.
+#
+# Setting RABBIT_WORKERS_PER_CPU higher than 1 causes the following errors:
+#
+#   Worker 4 finished unexpectedly with status 1
+#   Retrying connection on next host in line: energetic-thethuthinnang-2.bigwig.lshift.net:10311
+#   Heartbeat interval used (in seconds): 2
+#   Got an exception when receiving data: Connection reset by peer (Errno::ECONNRESET)
+#   Recovering from a network failure...
+#   An empty frame was received while opening the connection. In RabbitMQ <= 3.1 this could mean an authentication issue. 
+#   Unexpected error Could not establish TCP connection to any of the configured hosts.
+sneakers_options = {
+  connection: Bunny.new(ENV['CLOUDAMQP_URL'] || 'amqp://guest:guest@localhost:5672'),
+  amqp: ENV['CLOUDAMQP_URL'] || 'amqp://guest:guest@localhost:5672',
+  env: ENV['APP_ENV'] || 'development', # Worker environment.
+  workers: (ENV['RABBIT_WORKERS_PER_CPU'] || 1).to_i,
+  threads: (ENV['RABBIT_WORKER_THREADS_PER_CPU'] || 1).to_i,
+  prefetch: (ENV['RABBIT_WORKER_THREADS_PER_CPU'] || 1).to_i,
+  timeout_job_after: 5,
+  handler: Sneakers::Handlers::Maxretry,
+  heartbeat: 2,
+  exchange: 'oanda_app',
+  metrics: Sneakers::Metrics::LoggingMetrics.new,
+  log: ENV['LOG_OUTPUT'] || $stdout
+}
+
+Sneakers.configure(sneakers_options)
+Sneakers.logger.level = Logger::INFO
+
+workers = [AccountUpdateWorker, StrategyUpdateWorker, StrategyRunAllWorker, StrategyRunOneWorker]
+
+if ENV['APP_ENV'] == 'backtest'
+  workers << StrategyBacktestWorker
+end
+
+r = Sneakers::Runner.new(workers)
+r.run
